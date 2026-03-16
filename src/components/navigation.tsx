@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Settings, MapPin } from "lucide-react";
+import { Home, Settings, Target } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { href: "/", label: "Home", icon: Home },
-  { href: "/map", label: "Map", icon: MapPin },
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/", label: "Home", icon: Home, exact: true },
+  { href: "/sessions/new", label: "Session", icon: Target, exact: false },
+  { href: "/settings", label: "Settings", icon: Settings, exact: true },
 ];
 
 export function BottomNav() {
@@ -18,7 +18,9 @@ export function BottomNav() {
     <nav className="fixed bottom-0 left-0 right-0 z-50 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 safe-bottom">
       <div className="mx-auto flex h-16 max-w-md items-center justify-around px-4">
         {navItems.map((item) => {
-          const isActive = pathname === item.href;
+          const isActive = item.exact
+            ? pathname === item.href
+            : pathname.startsWith("/sessions");
           return (
             <Link
               key={item.href}

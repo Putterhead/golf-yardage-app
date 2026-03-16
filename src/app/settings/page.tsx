@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Save, Loader2 } from "lucide-react";
+import { Save, Loader2, Club, Mountain } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,8 @@ import {
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Separator } from "@/components/ui/separator";
+import { ClubTagInput } from "@/components/ui/club-tag-input";
+import { Switch } from "@/components/ui/switch";
 import {
   type DistanceUnit,
   type TemperatureUnit,
@@ -33,6 +35,8 @@ const settingsSchema = z.object({
   distance_unit: z.enum(["yards", "meters"]),
   temperature_unit: z.enum(["celsius", "fahrenheit"]),
   wind_unit: z.enum(["kmh", "mph"]),
+  clubset: z.array(z.string()).default([]),
+  altitude_adjustment: z.boolean().default(true),
 });
 
 type SettingsFormValues = z.infer<typeof settingsSchema>;
@@ -48,51 +52,76 @@ export default function SettingsPage() {
       distance_unit: DEFAULT_SETTINGS.distance_unit,
       temperature_unit: DEFAULT_SETTINGS.temperature_unit,
       wind_unit: DEFAULT_SETTINGS.wind_unit,
+      clubset: DEFAULT_SETTINGS.clubset ?? [],
+      altitude_adjustment: DEFAULT_SETTINGS.altitude_adjustment ?? true,
     },
   });
 
   // Load settings on mount
-  useEffect(() => {
-    async function load() {
-      try {
-        const deviceId = getDeviceId();
-        const data = await fetchSettings(deviceId);
-        if (data) {
-          form.reset({
-            distance_unit: data.distance_unit,
-            temperature_unit: data.temperature_unit,
-            wind_unit: data.wind_unit,
-          });
-        }
-      } catch (err) {
-        console.error("Failed to load settings:", err);
-      } finally {
-        setLoading(false);
+// Load settings on mount
+useEffect(() => {
+  async function load() {
+    try {
+      const deviceId = getDeviceId();
+      console.log("Settings load - deviceId:", deviceId);
+
+      const data = await fetchSettings(deviceId);
+      console.log("Settings fetch result:", data); // ← this will tell us if row is found
+
+      if (data) {
+        console.log("Applying saved settings to form:", {
+          distance_unit: data.distance_unit,
+          temperature_unit: data.temperature_unit,
+          wind_unit: data.wind_unit,
+        });
+        form.reset({
+          distance_unit: data.distance_unit,
+          temperature_unit: data.temperature_unit,
+          wind_unit: data.wind_unit,
+          clubset: data.clubset ?? [],
+          altitude_adjustment: data.altitude_adjustment ?? true,
+        });
+      } else {
+        console.log("No saved settings found — using defaults");
       }
+    } catch (err) {
+      console.error("Unexpected error loading settings:", err);
+    } finally {
+      setLoading(false);
     }
-    load();
-  }, [form]);
+  }
+
+  load();
+}, [form]); // dependency on form is fine if form is stable
 
   // Save handler
   async function onSubmit(values: SettingsFormValues) {
-    setSaving(true);
-    try {
-      const deviceId = getDeviceId();
-      const ok = await saveSettings({
-        device_id: deviceId,
-        ...values,
-      });
-      if (ok) {
-        toast.success("Settings saved");
-      } else {
-        toast.error("Failed to save settings");
+  setSaving(true);
+  try {
+    const deviceId = getDeviceId();
+    const ok = await saveSettings(deviceId, values);  // ← FIXED: string first, then values object
+    if (ok) {
+      toast.success("Settings saved");
+      // Optional: immediate re-fetch to confirm
+      const updated = await fetchSettings(deviceId);
+      if (updated) {
+        form.reset({
+          distance_unit: updated.distance_unit,
+          temperature_unit: updated.temperature_unit,
+          wind_unit: updated.wind_unit,
+          clubset: updated.clubset ?? [],
+          altitude_adjustment: updated.altitude_adjustment ?? true,
+        });
       }
-    } catch {
-      toast.error("An error occurred");
-    } finally {
-      setSaving(false);
+    } else {
+      toast.error("Failed to save settings");
     }
+  } catch {
+    toast.error("An error occurred");
+  } finally {
+    setSaving(false);
   }
+}
 
   if (loading) {
     return (
@@ -203,6 +232,50 @@ export default function SettingsPage() {
                 </Label>
               </div>
             </RadioGroup>
+          </CardContent>
+        </Card>
+
+        {/* Altitude Adjustment */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Mountain className="h-4 w-4 text-primary" />
+              Altitude Adjustment
+            </CardTitle>
+            <CardDescription>
+              Adjust carry distances for elevation (approx +1.2% per 1,000 ft)
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="altitude-adj" className="cursor-pointer">
+                Enable altitude adjustment
+              </Label>
+              <Switch
+                id="altitude-adj"
+                checked={form.watch("altitude_adjustment")}
+                onCheckedChange={(v) => form.setValue("altitude_adjustment", v, { shouldDirty: true })}
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Club Set */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Club className="h-4 w-4 text-primary" />
+              Club Set
+            </CardTitle>
+            <CardDescription>
+              Your bag — used for club selection on the range
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ClubTagInput
+              value={form.watch("clubset") ?? []}
+              onChange={(clubs) => form.setValue("clubset", clubs, { shouldDirty: true })}
+            />
           </CardContent>
         </Card>
 

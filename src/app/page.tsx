@@ -1,7 +1,40 @@
-import { Target, Wind, Thermometer, Ruler } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import {
+  Target,
+  Wind,
+  Thermometer,
+  Droplets,
+  Plus,
+  Loader2,
+  Clock,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
+import { type Session, fetchSessions, getDeviceId } from "@/lib/supabase";
 
 export default function HomePage() {
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      const deviceId = getDeviceId();
+      const data = await fetchSessions(deviceId);
+      setSessions(data);
+      setLoading(false);
+    }
+    load();
+  }, []);
+
   return (
     <div className="flex flex-col gap-6 p-4 pt-6 md:p-8">
       {/* Header */}
@@ -15,69 +48,83 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* Quick Stats Grid */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">
-              Distance
-            </CardTitle>
-            <Ruler className="h-4 w-4 text-primary" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">— yd</div>
-          </CardContent>
-        </Card>
+      {/* Start Session CTA */}
+      <Link href="/sessions/new">
+        <Button size="lg" className="w-full text-base">
+          <Plus className="mr-2 h-5 w-5" />
+          Start New Range Session
+        </Button>
+      </Link>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">
-              Wind
-            </CardTitle>
-            <Wind className="h-4 w-4 text-primary" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">— mph</div>
-          </CardContent>
-        </Card>
+      {/* Past Sessions */}
+      <div>
+        <h2 className="mb-3 text-lg font-semibold tracking-tight">
+          Past Sessions
+        </h2>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">
-              Temp
-            </CardTitle>
-            <Thermometer className="h-4 w-4 text-primary" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">—°F</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">
-              Elevation
-            </CardTitle>
-            <Target className="h-4 w-4 text-primary" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">— ft</div>
-          </CardContent>
-        </Card>
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : sessions.length === 0 ? (
+          <Card className="flex min-h-[180px] items-center justify-center">
+            <CardContent className="text-center">
+              <Target className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+              <p className="text-sm text-muted-foreground">
+                No sessions yet. Start your first range session!
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {sessions.map((s) => (
+              <Link
+                key={s.id}
+                href={`/sessions/${s.id}/range`}
+              >
+                <Card className="transition-colors hover:border-primary/40">
+                  <CardHeader className="pb-2">
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="text-sm font-medium">
+                        <Clock className="mr-1.5 inline h-3.5 w-3.5 text-muted-foreground" />
+                        {s.created_at
+                          ? new Date(s.created_at).toLocaleDateString(
+                              undefined,
+                              {
+                                weekday: "short",
+                                month: "short",
+                                day: "numeric",
+                                hour: "numeric",
+                                minute: "2-digit",
+                              }
+                            )
+                          : "Unknown date"}
+                      </CardTitle>
+                    </div>
+                    <CardDescription className="flex flex-wrap gap-3 pt-1 text-xs">
+                      <span className="inline-flex items-center gap-1">
+                        <Thermometer className="h-3 w-3" />
+                        {s.temperature}°
+                        {s.temperature_unit === "celsius" ? "C" : "F"}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <Wind className="h-3 w-3" />
+                        {s.wind_speed}{" "}
+                        {s.wind_unit === "kmh" ? "km/h" : "mph"}{" "}
+                        {s.wind_direction}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <Droplets className="h-3 w-3" />
+                        {s.humidity}%
+                      </span>
+                    </CardDescription>
+                  </CardHeader>
+                </Card>
+              </Link>
+            ))}
+          </div>
+        )}
       </div>
-
-      {/* Placeholder area for map / chart */}
-      <Card className="flex min-h-[300px] items-center justify-center md:min-h-[400px]">
-        <CardContent className="text-center">
-          <Target className="mx-auto mb-4 h-12 w-12 text-muted-foreground/40" />
-          <p className="text-lg font-medium text-muted-foreground">
-            Select a target on the Map tab
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground/60">
-            Yardage, wind, and elevation data will appear here
-          </p>
-        </CardContent>
-      </Card>
     </div>
   );
 }
