@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   GoogleMap,
   useJsApiLoader,
   Marker,
-  Polyline,
 } from "@react-google-maps/api";
 import {
   Loader2,
@@ -17,6 +16,7 @@ import {
   Flag,
   CircleDot,
   Trash2,
+  RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -71,6 +71,31 @@ const MAP_CONTAINER: React.CSSProperties = {
   width: "100%",
   height: "100%",
 };
+
+const DRAG_THROTTLE_MS = 50; // ~20fps cap for smooth mobile drag
+
+// Stable Polyline options (defined outside component to avoid re-creation)
+const POLYLINE_TEE_TARGET: google.maps.PolylineOptions = {
+  strokeColor: "#ffffff",
+  strokeOpacity: 0,
+  strokeWeight: 2,
+  geodesic: true,
+  icons: [
+    {
+      icon: { path: "M 0,-1 0,1", strokeOpacity: 0.6, scale: 3 },
+      offset: "0",
+      repeat: "12px",
+    },
+  ],
+};
+
+const POLYLINE_PREVIEW: google.maps.PolylineOptions = {
+  strokeColor: "#22c55e",
+  strokeOpacity: 0.9,
+  strokeWeight: 3,
+  geodesic: true,
+};
+
 
 const DARK_MAP_STYLES: google.maps.MapTypeStyle[] = [
   { elementType: "geometry", stylers: [{ color: "#212121" }] },
@@ -130,7 +155,62 @@ export default function RangePage() {
   const [selectedClub, setSelectedClub] = useState<string>("");
   const [center, setCenter] = useState<LatLng>({ lat: 33.5, lng: -111.9 });
   const [saving, setSaving] = useState(false);
-  const [mapType, setMapType] = useState<string>("hybrid");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [mapType] = useState<string>(() => {
+    if (typeof window === "undefined") return "satellite";
+    return localStorage.getItem("golf_map_type") ?? "satellite";
+  });
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const lastDragTs = useRef(0);
+  const teeTargetLineRef = useRef<google.maps.Polyline | null>(null);
+  const previewLineRef = useRef<google.maps.Polyline | null>(null);
+
+  const onMapLoad = useCallback((map: google.maps.Map) => {
+    mapRef.current = map;
+    map.setMapTypeId(mapType);
+  }, [mapType]);
+
+  // ── Native polyline: Tee → Target (white dashed) ─────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (tee && target && map) {
+      if (!teeTargetLineRef.current) {
+        teeTargetLineRef.current = new google.maps.Polyline({
+          ...POLYLINE_TEE_TARGET,
+          map,
+        });
+      }
+      teeTargetLineRef.current.setPath([tee, target]);
+    } else if (teeTargetLineRef.current) {
+      teeTargetLineRef.current.setMap(null);
+      teeTargetLineRef.current = null;
+    }
+  }, [tee, target]);
+
+  // ── Native polyline: Tee → Landing preview (green solid) ─────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (tee && landing && map) {
+      if (!previewLineRef.current) {
+        previewLineRef.current = new google.maps.Polyline({
+          ...POLYLINE_PREVIEW,
+          map,
+        });
+      }
+      previewLineRef.current.setPath([tee, landing]);
+    } else if (previewLineRef.current) {
+      previewLineRef.current.setMap(null);
+      previewLineRef.current = null;
+    }
+  }, [tee, landing]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      teeTargetLineRef.current?.setMap(null);
+      previewLineRef.current?.setMap(null);
+    };
+  }, []);
 
   // Set default selected club once clubList is resolved
   useEffect(() => {
@@ -157,8 +237,20 @@ export default function RangePage() {
     load();
   }, [sessionId]);
 
-  // ── Geolocation on mount ───────────────────────────────────────────
+  // ── Center map: session location → default range location → browser geolocation
   useEffect(() => {
+    // 1. Session has a stored location
+    if (session?.location_lat != null && session?.location_lng != null) {
+      setCenter({ lat: session.location_lat, lng: session.location_lng });
+      return;
+    }
+    // 2. Default range location from settings
+    const defaultLoc = (settings.range_locations ?? []).find((l) => l.is_default);
+    if (defaultLoc) {
+      setCenter({ lat: defaultLoc.lat, lng: defaultLoc.lng });
+      return;
+    }
+    // 3. Browser geolocation
     if ("geolocation" in navigator) {
       navigator.geolocation.getCurrentPosition(
         (pos) =>
@@ -166,7 +258,7 @@ export default function RangePage() {
         () => {} // ignore error, keep default center
       );
     }
-  }, []);
+  }, [session, settings.range_locations]);
 
   // ── Map click handler ──────────────────────────────────────────────
   const handleMapClick = useCallback(
@@ -184,10 +276,12 @@ export default function RangePage() {
         setTarget(pt);
         setLanding(null);
         setMode("idle");
+        console.log("Target pin placed");
         toast.info("Target placed. Hit a shot, then tap Landing.");
       } else if (mode === "landing") {
         setLanding(pt);
         setMode("idle");
+        console.log("Landing pin placed");
       }
     },
     [mode]
@@ -237,6 +331,7 @@ export default function RangePage() {
     if (shot) {
       setShots((prev) => [...prev, shot]);
       setLanding(null);
+      console.log("Shot saved — clearing preview");
       toast.success(`${selectedClub}: ${shotPreview.adjustedCarry.toFixed(0)} ${shotPreview.unit}`);
     } else {
       toast.error("Failed to save shot");
@@ -244,16 +339,72 @@ export default function RangePage() {
     setSaving(false);
   }
 
-  // ── Delete shot ────────────────────────────────────────────────────
+  // ── Delete shot (optimistic) ──────────────────────────────────────
   async function handleDeleteShot(shotId: string) {
+    const prev = shots;
+    setShots((s) => s.filter((sh) => sh.id !== shotId));
+    setDeletingId(shotId);
+
     const ok = await deleteShot(shotId);
     if (ok) {
       const updated = await fetchShots(sessionId);
       setShots(updated);
-      toast.success("Shot deleted");
+      toast.success("Shot deleted successfully");
     } else {
-      toast.error("Failed to delete shot");
+      setShots(prev);
+      toast.error("Failed to delete shot — restored");
     }
+    setDeletingId(null);
+  }
+
+  // ── Marker drag handlers (throttled live + finalize on end) ─────
+  function handleTeeDrag(e: google.maps.MapMouseEvent) {
+    const now = Date.now();
+    if (now - lastDragTs.current < DRAG_THROTTLE_MS) return;
+    lastDragTs.current = now;
+    if (!e.latLng) return;
+    setTee({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+  }
+
+  function handleTeeDragEnd(e: google.maps.MapMouseEvent) {
+    if (!e.latLng) return;
+    setTee({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+  }
+
+  function handleTargetDrag(e: google.maps.MapMouseEvent) {
+    const now = Date.now();
+    if (now - lastDragTs.current < DRAG_THROTTLE_MS) return;
+    lastDragTs.current = now;
+    if (!e.latLng) return;
+    setTarget({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+  }
+
+  function handleTargetDragEnd(e: google.maps.MapMouseEvent) {
+    if (!e.latLng) return;
+    setTarget({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+  }
+
+  function handleLandingDrag(e: google.maps.MapMouseEvent) {
+    const now = Date.now();
+    if (now - lastDragTs.current < DRAG_THROTTLE_MS) return;
+    lastDragTs.current = now;
+    if (!e.latLng) return;
+    setLanding({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+  }
+
+  function handleLandingDragEnd(e: google.maps.MapMouseEvent) {
+    if (!e.latLng) return;
+    setLanding({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+  }
+
+  // ── Reset pins ──────────────────────────────────────────────────────
+  function handleResetPins() {
+    console.log("Reset Pins clicked — clearing tee/target/landing");
+    setTee(null);
+    setTarget(null);
+    setLanding(null);
+    setMode("idle");
+    toast.info("Pins cleared — set Tee to start");
   }
 
   // ── New Shot (reset landing) ───────────────────────────────────────
@@ -342,6 +493,20 @@ export default function RangePage() {
           Landing
         </Button>
 
+        {/* Reset pins */}
+        {tee && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleResetPins}
+            className="h-10 min-w-[80px] text-muted-foreground"
+            title="Reset tee and target positions"
+          >
+            <RotateCcw className="mr-1 h-4 w-4" />
+            Reset
+          </Button>
+        )}
+
         {/* Club selector */}
         <Select value={selectedClub} onValueChange={setSelectedClub}>
           <SelectTrigger className="h-10 w-[110px]">
@@ -370,11 +535,14 @@ export default function RangePage() {
             zoom={18}
             mapTypeId={mapType}
             onClick={handleMapClick}
+            onLoad={onMapLoad}
             options={{
+              mapTypeId: mapType,
               styles: mapType === "roadmap" ? DARK_MAP_STYLES : [],
               disableDefaultUI: true,
               zoomControl: true,
               gestureHandling: "greedy",
+              draggableCursor: "grab",
               clickableIcons: false,
             }}
           >
@@ -382,72 +550,36 @@ export default function RangePage() {
               <Marker
                 position={tee}
                 label={{ text: "T", color: "#fff", fontWeight: "bold" }}
+                draggable
+                onDrag={handleTeeDrag}
+                onDragEnd={handleTeeDragEnd}
+                title="Drag to reposition tee"
               />
             )}
             {target && (
               <Marker
                 position={target}
                 label={{ text: "F", color: "#fff", fontWeight: "bold" }}
+                draggable
+                onDrag={handleTargetDrag}
+                onDragEnd={handleTargetDragEnd}
+                title="Drag to reposition target"
               />
             )}
             {landing && (
               <Marker
                 position={landing}
                 label={{ text: "L", color: "#fff", fontWeight: "bold" }}
+                draggable
+                onDragStart={() => { console.log("Preview cleared on drag start"); setMode("idle"); }}
+                onDrag={handleLandingDrag}
+                onDragEnd={handleLandingDragEnd}
+                title="Drag to adjust landing"
               />
             )}
 
-            {/* Tee → Target line (white dashed) */}
-            {tee && target && (
-              <Polyline
-                path={[tee, target]}
-                options={{
-                  strokeColor: "#ffffff",
-                  strokeOpacity: 0.6,
-                  strokeWeight: 2,
-                  geodesic: true,
-                  icons: [
-                    {
-                      icon: { path: "M 0,-1 0,1", strokeOpacity: 1, scale: 3 },
-                      offset: "0",
-                      repeat: "12px",
-                    },
-                  ],
-                }}
-              />
-            )}
-
-            {/* Tee → Landing line (green) */}
-            {tee && landing && (
-              <Polyline
-                path={[tee, landing]}
-                options={{
-                  strokeColor: "#22c55e",
-                  strokeOpacity: 0.9,
-                  strokeWeight: 3,
-                  geodesic: true,
-                }}
-              />
-            )}
           </GoogleMap>
         )}
-
-        {/* Map type toggle */}
-        <div className="absolute right-2 top-2 flex overflow-hidden rounded-md border border-white/20 bg-background/80 shadow-lg backdrop-blur-sm">
-          {(["roadmap", "satellite", "hybrid"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setMapType(t)}
-              className={`px-2.5 py-1.5 text-[11px] font-medium capitalize transition-colors ${
-                mapType === t
-                  ? "bg-primary text-primary-foreground"
-                  : "text-foreground/70 hover:bg-muted"
-              }`}
-            >
-              {t === "roadmap" ? "Map" : t === "satellite" ? "Sat" : "Hybrid"}
-            </button>
-          ))}
-        </div>
 
         {/* Mode indicator overlay */}
         {mode !== "idle" && (
@@ -579,16 +711,21 @@ export default function RangePage() {
                     <AlertDialogTrigger asChild>
                       <button
                         type="button"
-                        className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        aria-label="Delete shot"
+                        className="-mr-1 rounded-md p-2 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        {deletingId === s.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
                       </button>
                     </AlertDialogTrigger>
                     <AlertDialogContent>
                       <AlertDialogHeader>
                         <AlertDialogTitle>Delete this shot?</AlertDialogTitle>
                         <AlertDialogDescription>
-                          Shot {i + 1} ({s.club} — {s.carry_adjusted} {distLabel}) will be permanently removed.
+                          Shot {i + 1} ({s.club} — {s.carry_adjusted} {distLabel}) will be permanently removed. This action cannot be undone.
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>

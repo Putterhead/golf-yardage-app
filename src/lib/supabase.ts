@@ -24,6 +24,15 @@ export type DistanceUnit = "yards" | "meters";
 export type TemperatureUnit = "celsius" | "fahrenheit";
 export type WindUnit = "kmh" | "mph";
 
+export interface RangeLocation {
+  name: string;
+  lat: number;
+  lng: number;
+  orientation: number;
+  elevation: number | null;
+  is_default: boolean;
+}
+
 export interface UserSettings {
   id?: string;
   device_id: string;
@@ -32,6 +41,7 @@ export interface UserSettings {
   wind_unit: WindUnit;
   clubset?: string[];
   altitude_adjustment?: boolean;
+  range_locations?: RangeLocation[];
   updated_at?: string;
 }
 
@@ -74,6 +84,7 @@ export const DEFAULT_SETTINGS: Omit<UserSettings, "device_id"> = {
   wind_unit: "mph",
   clubset: [],
   altitude_adjustment: true,
+  range_locations: [],
 };
 
 /** Fetch settings for the current device */
@@ -142,6 +153,9 @@ export interface Session {
   wind_direction: string;
   elevation: number;
   distance_unit: DistanceUnit;
+  location_name?: string | null;
+  location_lat?: number | null;
+  location_lng?: number | null;
   created_at?: string;
 }
 
@@ -231,6 +245,22 @@ export async function fetchSessions(deviceId: string): Promise<Session[]> {
   return (data as Session[]) ?? [];
 }
 
+export async function fetchLatestSession(deviceId: string): Promise<Session | null> {
+  const { data, error } = await supabase
+    .from("sessions")
+    .select("*")
+    .eq("device_id", deviceId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Error fetching latest session:", error);
+    return null;
+  }
+  return data as Session | null;
+}
+
 // ── Shot CRUD ────────────────────────────────────────────────────────
 
 export async function createShot(shot: Omit<Shot, "id" | "created_at">): Promise<Shot | null> {
@@ -259,6 +289,82 @@ export async function fetchShots(sessionId: string): Promise<Shot[]> {
     return [];
   }
   return (data as Shot[]) ?? [];
+}
+
+/** Fetch shot counts keyed by session_id for a list of session IDs */
+export async function fetchShotCounts(sessionIds: string[]): Promise<Record<string, number>> {
+  if (sessionIds.length === 0) return {};
+
+  const { data, error } = await supabase
+    .from("shots")
+    .select("session_id")
+    .in("session_id", sessionIds);
+
+  if (error) {
+    console.error("Error fetching shot counts:", error);
+    return {};
+  }
+
+  const counts: Record<string, number> = {};
+  for (const row of data ?? []) {
+    const sid = (row as { session_id: string }).session_id;
+    counts[sid] = (counts[sid] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/** Fetch ALL shots for a device (across all sessions) */
+export async function fetchAllShotsForDevice(deviceId: string): Promise<(Shot & { session_id: string })[]> {
+  // 1. Get all session IDs for this device
+  const { data: sessionRows, error: sErr } = await supabase
+    .from("sessions")
+    .select("id")
+    .eq("device_id", deviceId);
+
+  if (sErr || !sessionRows || sessionRows.length === 0) {
+    if (sErr) console.error("Error fetching session IDs:", sErr);
+    return [];
+  }
+
+  const sessionIds = sessionRows.map((r) => (r as { id: string }).id);
+
+  // 2. Fetch all shots for those sessions
+  const { data, error } = await supabase
+    .from("shots")
+    .select("*")
+    .in("session_id", sessionIds)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    console.error("Error fetching all shots:", error);
+    return [];
+  }
+  return (data as (Shot & { session_id: string })[]) ?? [];
+}
+
+/** Delete a session and all its shots (cascade) */
+export async function deleteSession(sessionId: string): Promise<boolean> {
+  // Delete shots first (no FK cascade in Supabase by default)
+  const { error: shotErr } = await supabase
+    .from("shots")
+    .delete()
+    .eq("session_id", sessionId);
+
+  if (shotErr) {
+    console.error("Error deleting shots for session:", shotErr);
+    return false;
+  }
+
+  const { error } = await supabase
+    .from("sessions")
+    .delete()
+    .eq("id", sessionId);
+
+  if (error) {
+    console.error("Error deleting session:", error);
+    return false;
+  }
+  return true;
 }
 
 export async function deleteShot(shotId: string): Promise<boolean> {
